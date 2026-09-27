@@ -18,7 +18,8 @@ final class FishGameScene: SKScene {
     weak var gameState: GameState?
     private let world = SKNode()
     private var agents: [PreyAgent] = []
-    private var preyChoice: PreyChoice = .fish
+    private var musicMode: MusicMode = .drums
+    private var visualMode: VisualMode = .nightPond
     private var lastUpdate: TimeInterval = 0
     private var lastInteraction = Date()
     private var skillLevel = 0.0
@@ -27,11 +28,12 @@ final class FishGameScene: SKScene {
     private var activeTouches: Set<ObjectIdentifier> = []
     private var ownerHoldWork: DispatchWorkItem?
     private let drumEngine = DrumSoundEngine()
-    private let desiredPreyCount = 4
+    private let guitarEngine = GuitarSoundEngine()
+    private var desiredPreyCount: Int { musicMode == .drums ? 4 : 5 }
 
     override func didMove(to view: SKView) {
         view.isMultipleTouchEnabled = true
-        backgroundColor = UIColor(red: 0.08, green: 0.58, blue: 0.68, alpha: 1)
+        backgroundColor = UIColor(red: 0.01, green: 0.06, blue: 0.13, alpha: 1)
         addChild(world); buildEnvironment(); refillPrey(after: 0)
     }
 
@@ -40,8 +42,10 @@ final class FishGameScene: SKScene {
         buildEnvironment(); refillPrey(after: 0.1)
     }
 
-    func configure(prey: PreyChoice, speed: Double, targetSize: Double) {
-        preyChoice = prey; speedSetting = speed; sizeSetting = targetSize
+    func configure(musicMode: MusicMode, visualMode: VisualMode, speed: Double, targetSize: Double) {
+        self.musicMode = musicMode; self.visualMode = visualMode
+        speedSetting = speed; sizeSetting = targetSize
+        buildEnvironment()
     }
 
     func restartHunt() {
@@ -52,19 +56,28 @@ final class FishGameScene: SKScene {
 
     private func buildEnvironment() {
         world.removeAllChildren(); agents.removeAll()
+        if visualMode == .blackAndWhite {
+            backgroundColor = .white
+            return
+        }
+        backgroundColor = UIColor(red: 0.01, green: 0.06, blue: 0.13, alpha: 1)
         let backdrop = SKSpriteNode(imageNamed: "UnderwaterBackground")
         backdrop.anchorPoint = .zero
         let textureSize = backdrop.texture?.size() ?? size
         let scale = max(size.width / textureSize.width, size.height / textureSize.height)
         backdrop.size = CGSize(width: textureSize.width * scale, height: textureSize.height * scale)
         backdrop.position = CGPoint(x: (size.width - backdrop.size.width) / 2, y: 0)
+        backdrop.color = UIColor(red: 0.0, green: 0.05, blue: 0.13, alpha: 1)
+        backdrop.colorBlendFactor = 0.72
+        backdrop.alpha = 0.78
         backdrop.zPosition = -20; world.addChild(backdrop)
-        for index in 0..<14 { addBubble(index: index) }
+        for index in 0..<4 { addBubble(index: index) }
     }
 
     private func addBubble(index: Int) {
         let bubble = SKShapeNode(circleOfRadius: CGFloat.random(in: 2...7))
-        bubble.strokeColor = UIColor.white.withAlphaComponent(0.3); bubble.lineWidth = 1.5; bubble.fillColor = .clear
+        bubble.strokeColor = UIColor(red: 0.46, green: 0.86, blue: 1, alpha: 0.16)
+        bubble.lineWidth = 1.3; bubble.fillColor = .clear
         bubble.position = CGPoint(x: CGFloat.random(in: 20...max(21, size.width - 20)), y: CGFloat.random(in: 0...max(1, size.height)))
         bubble.zPosition = -4; world.addChild(bubble)
         let rise = SKAction.moveBy(x: CGFloat.random(in: -22...22), y: size.height + 80, duration: Double.random(in: 8...14))
@@ -90,26 +103,66 @@ final class FishGameScene: SKScene {
 
     private func spawnPrey(after delay: TimeInterval) {
         let regular: [Instrument] = [.kick, .snare, .hiHat, agents.contains(where: { $0.instrument == .highTom }) ? .floorTom : .highTom]
-        let introduceCrash = !agents.contains(where: { $0.instrument == .crash }) && Double.random(in: 0...1) < 0.12
-        let instrument: Instrument = introduceCrash ? .crash : (regular.first { candidate in !agents.contains { $0.instrument == candidate } } ?? regular.randomElement()!)
+        let introduceCrash = musicMode == .drums && !agents.contains(where: { $0.instrument == .crash }) && Double.random(in: 0...1) < 0.12
+        let instrument: Instrument
+        if musicMode == .guitar {
+            instrument = Instrument.allCases.first { candidate in !agents.contains { $0.instrument == candidate } } ?? Instrument.allCases.randomElement()!
+        } else {
+            instrument = introduceCrash ? .crash : (regular.first { candidate in !agents.contains { $0.instrument == candidate } } ?? regular.randomElement()!)
+        }
         let node = SKSpriteNode(imageNamed: assetName(for: instrument))
         let textureSize = node.texture?.size() ?? CGSize(width: 2, height: 1)
         let adaptiveEase = max(0.86, 1 - skillLevel * 0.018)
-        let width = CGFloat(Double.random(in: 125...162) * sizeSetting * adaptiveEase)
+        let width = CGFloat(Double.random(in: 154...198) * sizeSetting * adaptiveEase)
         node.size = CGSize(width: width, height: width * textureSize.height / textureSize.width)
         node.zPosition = CGFloat.random(in: 3...7); node.alpha = 0; node.setScale(0.72)
+        if visualMode == .blackAndWhite {
+            node.color = .black
+            node.colorBlendFactor = 1
+        } else {
+            addHighContrastHalo(to: node, instrument: instrument)
+        }
         let fromLeft = Bool.random()
         node.position = CGPoint(x: fromLeft ? -width : size.width + width, y: freeY())
         node.xScale = fromLeft ? abs(node.xScale) : -abs(node.xScale)
         world.addChild(node)
         let agent = PreyAgent(node: node, instrument: instrument); agents.append(agent)
         let destination = CGPoint(x: CGFloat.random(in: size.width * 0.18...size.width * 0.82), y: freeY())
-        node.run(.sequence([.wait(forDuration: delay), .group([.fadeIn(withDuration: 0.18), .scale(to: 1, duration: 0.22), .move(to: destination, duration: Double.random(in: 0.65...1.15) / speedSetting)])])) { [weak self, weak agent] in
+        let reveal: SKAction = visualMode == .blackAndWhite ? .fadeAlpha(to: 1, duration: 0) : .fadeIn(withDuration: 0.18)
+        node.run(.sequence([.wait(forDuration: delay), .group([reveal, .scale(to: 1, duration: 0.22), .move(to: destination, duration: Double.random(in: 0.65...1.15) / speedSetting)])])) { [weak self, weak agent] in
             guard let self, let agent else { return }; self.beginRoaming(agent)
         }
     }
 
     private func freeY() -> CGFloat { CGFloat.random(in: 90...max(91, size.height - 105)) }
+
+    private func addHighContrastHalo(to node: SKSpriteNode, instrument: Instrument) {
+        guard let texture = node.texture else { return }
+        let haloColor: UIColor = switch instrument {
+        case .kick, .hiHat, .crash: UIColor(red: 1.0, green: 0.93, blue: 0.25, alpha: 1)
+        case .snare, .highTom, .floorTom: UIColor(red: 0.76, green: 0.95, blue: 1.0, alpha: 1)
+        }
+
+        let outer = SKSpriteNode(texture: texture)
+        outer.size = node.size
+        outer.color = haloColor
+        outer.colorBlendFactor = 1
+        outer.alpha = 0.33
+        outer.setScale(1.13)
+        outer.zPosition = -2
+        outer.blendMode = .add
+        node.addChild(outer)
+
+        let rim = SKSpriteNode(texture: texture)
+        rim.size = node.size
+        rim.color = .white
+        rim.colorBlendFactor = 1
+        rim.alpha = 0.34
+        rim.setScale(1.055)
+        rim.zPosition = -1
+        rim.blendMode = .screen
+        node.addChild(rim)
+    }
 
     private func beginRoaming(_ agent: PreyAgent) {
         guard agent.node.parent != nil else { return }
@@ -173,20 +226,23 @@ final class FishGameScene: SKScene {
     private func hide(_ agent: PreyAgent) {
         agent.state = .hiding
         let edgeX: CGFloat = agent.node.position.x < size.width / 2 ? 18 : size.width - 18
-        agent.node.run(.group([.moveTo(x: edgeX, duration: 0.38), .fadeAlpha(to: 0.12, duration: 0.38), .scale(to: 0.78, duration: 0.38)]))
+        let hiddenAlpha: CGFloat = visualMode == .blackAndWhite ? 1 : 0.12
+        agent.node.run(.group([.moveTo(x: edgeX, duration: 0.38), .fadeAlpha(to: hiddenAlpha, duration: 0.38), .scale(to: 0.78, duration: 0.38)]))
         agent.stateUntil = lastUpdate + Double.random(in: 0.55...1.45)
     }
 
     private func reappear(_ agent: PreyAgent) {
         agent.state = .entering
         let destination = CGPoint(x: CGFloat.random(in: size.width * 0.18...size.width * 0.82), y: freeY())
-        agent.node.run(.group([.fadeIn(withDuration: 0.18), .scale(to: 1, duration: 0.2), .move(to: destination, duration: 0.55)])) { [weak self, weak agent] in
+        let reveal: SKAction = visualMode == .blackAndWhite ? .fadeAlpha(to: 1, duration: 0) : .fadeIn(withDuration: 0.18)
+        agent.node.run(.group([reveal, .scale(to: 1, duration: 0.2), .move(to: destination, duration: 0.55)])) { [weak self, weak agent] in
             guard let self, let agent else { return }; self.beginRoaming(agent)
         }
     }
 
     private func lureAttention() {
-        drumEngine.play(.hiHat, strength: 0.45)
+        if musicMode == .drums { drumEngine.play(.hiHat, strength: 0.45) }
+        else { guitarEngine.play(noteIndex: 4, strength: 0.4) }
         for agent in agents.filter({ $0.state != .captured }).shuffled().prefix(2) {
             let node = agent.node, original = node.position
             node.run(.sequence([.moveBy(x: -18, y: 9, duration: 0.08), .moveBy(x: 36, y: -18, duration: 0.1), .move(to: original, duration: 0.1)]))
@@ -254,9 +310,14 @@ final class FishGameScene: SKScene {
     private func capture(_ agent: PreyAgent, at point: CGPoint) {
         agent.state = .captured; let caughtVelocity = agent.velocity; agent.velocity = .zero
         skillLevel = min(8, skillLevel + 0.55)
-        gameState?.caught(kind: agent.instrument.rawValue, at: point, velocity: caughtVelocity)
+        let guitarNames = ["低音 E", "A", "D", "G", "B", "高音 E"]
+        let noteIndex = Instrument.allCases.firstIndex(of: agent.instrument) ?? 0
+        gameState?.caught(kind: musicMode == .drums ? agent.instrument.rawValue : guitarNames[noteIndex], at: point, velocity: caughtVelocity)
         UINotificationFeedbackGenerator().notificationOccurred(.success)
-        drumEngine.play(agent.instrument, strength: min(1, 0.72 + skillLevel * 0.03)); makeSplash(at: agent.node.position, instrument: agent.instrument)
+        let strength = min(1, 0.72 + skillLevel * 0.03)
+        if musicMode == .drums { drumEngine.play(agent.instrument, strength: strength) }
+        else { guitarEngine.play(noteIndex: noteIndex, strength: strength) }
+        makeSplash(at: agent.node.position, instrument: agent.instrument)
         let wiggles: [SKAction] = [.rotate(toAngle: 0.12, duration: 0.06), .rotate(toAngle: -0.13, duration: 0.07), .rotate(toAngle: 0.08, duration: 0.06), .rotate(toAngle: 0, duration: 0.06)]
         agent.node.run(.sequence([.scale(to: 0.9, duration: 0.08), .sequence(wiggles), .wait(forDuration: 0.16), .group([.scale(to: 0.16, duration: 0.2), .fadeOut(withDuration: 0.2)])])) { [weak self, weak agent] in
             guard let self, let agent else { return }
@@ -267,23 +328,31 @@ final class FishGameScene: SKScene {
 
     private func makeRipple(at point: CGPoint) {
         for delay in [0.0, 0.08, 0.16] {
-            let ring = SKShapeNode(circleOfRadius: 12); ring.position = point; ring.strokeColor = .white; ring.lineWidth = 3; ring.alpha = 0.75; ring.zPosition = 12
+            let ring = SKShapeNode(circleOfRadius: 12); ring.position = point
+            ring.strokeColor = visualMode == .blackAndWhite ? .black : .white
+            ring.lineWidth = 3; ring.alpha = 0.75; ring.zPosition = 12
             world.addChild(ring); ring.run(.sequence([.wait(forDuration: delay), .group([.scale(to: 5.5, duration: 0.46), .fadeOut(withDuration: 0.46)]), .removeFromParent()]))
         }
     }
 
     private func makeSplash(at point: CGPoint, instrument: Instrument) {
-        let accent: UIColor = switch instrument {
-        case .kick: .systemYellow
-        case .snare: .white
-        case .hiHat: .systemOrange
-        case .highTom: .systemPurple
-        case .floorTom: .systemRed
-        case .crash: .systemYellow
+        let accent: UIColor
+        if visualMode == .blackAndWhite {
+            accent = .black
+        } else {
+            accent = switch instrument {
+            case .kick: .systemYellow
+            case .snare: .white
+            case .hiHat: .systemOrange
+            case .highTom: .systemPurple
+            case .floorTom: .systemRed
+            case .crash: .systemYellow
+            }
         }
         for _ in 0..<18 {
             let drop = SKShapeNode(circleOfRadius: CGFloat.random(in: 2...7)); drop.position = point
-            drop.fillColor = Bool.random() ? .white : accent; drop.strokeColor = .clear; drop.zPosition = 14; world.addChild(drop)
+            drop.fillColor = visualMode == .blackAndWhite ? (Bool.random() ? .black : .darkGray) : (Bool.random() ? .white : accent)
+            drop.strokeColor = .clear; drop.zPosition = 14; world.addChild(drop)
             drop.run(.sequence([.group([.moveBy(x: CGFloat.random(in: -105...105), y: CGFloat.random(in: -85...110), duration: 0.52), .fadeOut(withDuration: 0.52), .scale(to: 0.1, duration: 0.52)]), .removeFromParent()]))
         }
     }
@@ -354,6 +423,63 @@ private final class DrumSoundEngine {
             }
             let clipped = tanh(sample * 1.15) * 0.82
             var value = Int16(max(-1, min(1, clipped)) * Double(Int16.max))
+            pcm.append(Data(bytes: &value, count: 2))
+        }
+        return wavData(from: pcm)
+    }
+
+    private func wavData(from pcm: Data) -> Data {
+        var wav = Data()
+        func append<T>(_ value: T) { var value = value; wav.append(Data(bytes: &value, count: MemoryLayout<T>.size)) }
+        wav.append("RIFF".data(using: .ascii)!); append(UInt32(pcm.count + 36)); wav.append("WAVEfmt ".data(using: .ascii)!)
+        append(UInt32(16)); append(UInt16(1)); append(UInt16(1)); append(UInt32(sampleRate)); append(UInt32(sampleRate * 2)); append(UInt16(2)); append(UInt16(16))
+        wav.append("data".data(using: .ascii)!); append(UInt32(pcm.count)); wav.append(pcm)
+        return wav
+    }
+}
+
+private final class GuitarSoundEngine {
+    private let sampleRate = 44_100.0
+    private var strings: [Data] = []
+    private var players: [AVAudioPlayer] = []
+    private let frequencies = [82.41, 110.0, 146.83, 196.0, 246.94, 329.63]
+
+    init() {
+        strings = frequencies.enumerated().map { renderString(frequency: $0.element, seed: UInt64($0.offset + 11)) }
+    }
+
+    func play(noteIndex: Int, strength: Double) {
+        players.removeAll { !$0.isPlaying }
+        let index = max(0, min(strings.count - 1, noteIndex))
+        guard let player = try? AVAudioPlayer(data: strings[index]) else { return }
+        player.volume = Float(max(0.25, min(1, strength)))
+        player.prepareToPlay(); player.play(); players.append(player)
+    }
+
+    private func renderString(frequency: Double, seed: UInt64) -> Data {
+        let duration = 1.45
+        let count = Int(sampleRate * duration)
+        let delay = max(2, Int(sampleRate / frequency))
+        var ring = Array(repeating: 0.0, count: delay)
+        var state = seed
+        for index in ring.indices {
+            state = state &* 6_364_136_223_846_793_005 &+ 1
+            ring[index] = (Double(Int64(bitPattern: state) >> 32) / Double(Int32.max)) * 0.72
+        }
+        var pcm = Data(capacity: count * 2)
+        var position = 0
+        let damping = frequency < 120 ? 0.9964 : 0.9948
+        for index in 0..<count {
+            let current = ring[position]
+            let nextPosition = (position + 1) % delay
+            let averaged = (current + ring[nextPosition]) * 0.5 * damping
+            ring[position] = averaged
+            position = nextPosition
+            let t = Double(index) / sampleRate
+            let body = sin(2 * .pi * frequency * 0.5 * t) * exp(-t * 6) * 0.08
+            let pick = index < 80 ? current * (1 - Double(index) / 80) * 0.22 : 0
+            let output = tanh((current + body + pick) * 1.35) * 0.82
+            var value = Int16(max(-1, min(1, output)) * Double(Int16.max))
             pcm.append(Data(bytes: &value, count: 2))
         }
         return wavData(from: pcm)

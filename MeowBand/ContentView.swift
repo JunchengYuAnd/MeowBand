@@ -9,6 +9,18 @@ enum PreyChoice: String, CaseIterable, Identifiable {
     var icon: String { switch self { case .fish: "fish.fill"; case .shrimp: "water.waves"; case .moth: "sparkles" } }
 }
 
+enum MusicMode: String, CaseIterable, Identifiable {
+    case drums = "鼓组"
+    case guitar = "吉他"
+    var id: Self { self }
+}
+
+enum VisualMode: String, CaseIterable, Identifiable {
+    case nightPond = "高对比夜池"
+    case blackAndWhite = "黑白极简"
+    var id: Self { self }
+}
+
 @MainActor
 final class GameState: ObservableObject {
     enum Phase { case setup, playing, paused, finished }
@@ -16,6 +28,8 @@ final class GameState: ObservableObject {
     @Published var score = 0
     @Published var seconds = 180
     @Published var preyChoice: PreyChoice = .fish
+    @Published var musicMode: MusicMode = .drums
+    @Published var visualMode: VisualMode = .nightPond
     @Published var speed: Double = 1
     @Published var targetSize: Double = 1
     @Published var sessionMinutes = 3
@@ -27,7 +41,7 @@ final class GameState: ObservableObject {
 
     func begin() {
         score = 0; seconds = sessionMinutes * 60; phase = .playing
-        scene?.configure(prey: preyChoice, speed: speed, targetSize: targetSize)
+        scene?.configure(musicMode: musicMode, visualMode: visualMode, speed: speed, targetSize: targetSize)
         scene?.isPaused = false
         scene?.restartHunt()
         timer?.invalidate()
@@ -56,7 +70,10 @@ final class GameState: ObservableObject {
         phase = .paused; scene?.isPaused = true
     }
 
-    func resume() { phase = .playing; scene?.isPaused = false }
+    func resume() {
+        scene?.configure(musicMode: musicMode, visualMode: visualMode, speed: speed, targetSize: targetSize)
+        scene?.restartHunt(); phase = .playing; scene?.isPaused = false
+    }
     func finish() { phase = .finished; scene?.isPaused = true; timer?.invalidate() }
     func backToSetup() { phase = .setup; scene?.isPaused = true; timer?.invalidate() }
 }
@@ -101,8 +118,9 @@ struct ContentView: View {
             HStack(spacing: 44) {
                 VStack(alignment: .leading, spacing: 14) {
                     Text("MEOWBAND").font(.caption.weight(.black)).tracking(4).foregroundStyle(.yellow)
-                    Text("让小猫来打鼓").font(.system(size: 44, weight: .black, design: .rounded))
-                    Text("每种猎物都是一面鼓。\n抓到它，就敲响它。")
+                    Text(state.musicMode == .drums ? "让小猫来打鼓" : "让小猫弹吉他")
+                        .font(.system(size: 44, weight: .black, design: .rounded))
+                    Text(state.musicMode == .drums ? "每种猎物都是一面鼓。\n抓到它，就敲响它。" : "每种猎物都是一根琴弦。\n抓到它，就拨响它。")
                         .font(.title3.weight(.semibold)).foregroundStyle(.white.opacity(0.72)).lineSpacing(5)
                     Label("游戏中双指按住 2 秒打开主人设置", systemImage: "hand.raised.fingers.spread")
                         .font(.subheadline.weight(.bold)).foregroundStyle(.white.opacity(0.58)).padding(.top, 10)
@@ -123,12 +141,28 @@ struct ContentView: View {
 
     private func settingsPanel(buttonTitle: String, action: @escaping () -> Void) -> some View {
         VStack(spacing: 22) {
+            Picker("乐器", selection: $state.musicMode) {
+                ForEach(MusicMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
+            }
+            .pickerStyle(.segmented)
+            Picker("画面", selection: $state.visualMode) {
+                ForEach(VisualMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
+            }
+            .pickerStyle(.segmented)
             HStack(spacing: 8) {
-                drumLegend("fish.fill", "底鼓", .yellow)
-                drumLegend("circle.grid.cross", "军鼓", .cyan)
-                drumLegend("water.waves", "踩镲", .orange)
-                drumLegend("circle.hexagongrid", "嗵鼓", .purple)
-                drumLegend("sparkles", "镲片", .white)
+                if state.musicMode == .drums {
+                    instrumentLegend("fish.fill", "底鼓", .yellow)
+                    instrumentLegend("circle.grid.cross", "军鼓", .cyan)
+                    instrumentLegend("water.waves", "踩镲", .orange)
+                    instrumentLegend("circle.hexagongrid", "嗵鼓", .purple)
+                    instrumentLegend("sparkles", "镲片", .white)
+                } else {
+                    instrumentLegend("circle.fill", "低音 E", .orange)
+                    instrumentLegend("circle.fill", "A", .yellow)
+                    instrumentLegend("circle.fill", "D", .cyan)
+                    instrumentLegend("circle.fill", "G", .blue)
+                    instrumentLegend("sparkles", "高音 E", .purple)
+                }
             }
             settingSlider("速度", value: $state.speed, range: 0.65...1.45, low: "悠闲", high: "敏捷")
             settingSlider("猎物大小", value: $state.targetSize, range: 0.8...1.35, low: "小", high: "大")
@@ -145,7 +179,7 @@ struct ContentView: View {
         .shadow(color: .black.opacity(0.3), radius: 35, y: 18)
     }
 
-    private func drumLegend(_ icon: String, _ name: String, _ color: Color) -> some View {
+    private func instrumentLegend(_ icon: String, _ name: String, _ color: Color) -> some View {
         VStack(spacing: 7) {
             Image(systemName: icon).font(.title3).foregroundStyle(color)
             Text(name).font(.caption.weight(.black))
