@@ -1,6 +1,5 @@
 import SpriteKit
 import UIKit
-import AVFoundation
 
 final class FishGameScene: SKScene {
     enum Instrument: String, CaseIterable { case kick = "底鼓", snare = "军鼓", hiHat = "踩镲", highTom = "高嗵鼓", floorTom = "低嗵鼓", crash = "镲片" }
@@ -18,7 +17,7 @@ final class FishGameScene: SKScene {
     weak var gameState: GameState?
     private let world = SKNode()
     private var agents: [PreyAgent] = []
-    private var musicMode: MusicMode = .drums
+    private var game: EnsembleRole = .drums
     private var visualMode: VisualMode = .nightPond
     private var lastUpdate: TimeInterval = 0
     private var lastInteraction = Date()
@@ -27,9 +26,16 @@ final class FishGameScene: SKScene {
     private var sizeSetting = 1.0
     private var activeTouches: Set<ObjectIdentifier> = []
     private var ownerHoldWork: DispatchWorkItem?
-    private let drumEngine = DrumSoundEngine()
-    private let guitarEngine = GuitarSoundEngine()
-    private var desiredPreyCount: Int { musicMode == .drums ? 4 : 5 }
+    private let music = EnsembleAudio()
+    private var musicGame: EnsembleRole?
+    private var desiredPreyCount: Int { game.preyCount }
+
+    func startMusic(game: EnsembleRole) throws { try music.start(role: game); musicGame = game }
+    func pauseMusic() { music.pause(); ownerHoldWork?.cancel(); activeTouches.removeAll() }
+    func stopMusic() { music.stop(); musicGame = nil }
+    func resumeMusic(game: EnsembleRole) throws {
+        if musicGame == game { try music.resume() } else { try startMusic(game: game) }
+    }
 
     override func didMove(to view: SKView) {
         view.isMultipleTouchEnabled = true
@@ -42,8 +48,8 @@ final class FishGameScene: SKScene {
         buildEnvironment(); refillPrey(after: 0.1)
     }
 
-    func configure(musicMode: MusicMode, visualMode: VisualMode, speed: Double, targetSize: Double) {
-        self.musicMode = musicMode; self.visualMode = visualMode
+    func configure(game: EnsembleRole, visualMode: VisualMode, speed: Double, targetSize: Double) {
+        self.game = game; self.visualMode = visualMode
         speedSetting = speed; sizeSetting = targetSize
         buildEnvironment()
     }
@@ -102,18 +108,17 @@ final class FishGameScene: SKScene {
     }
 
     private func spawnPrey(after delay: TimeInterval) {
-        let regular: [Instrument] = [.kick, .snare, .hiHat, agents.contains(where: { $0.instrument == .highTom }) ? .floorTom : .highTom]
-        let introduceCrash = musicMode == .drums && !agents.contains(where: { $0.instrument == .crash }) && Double.random(in: 0...1) < 0.12
-        let instrument: Instrument
-        if musicMode == .guitar {
-            instrument = Instrument.allCases.first { candidate in !agents.contains { $0.instrument == candidate } } ?? Instrument.allCases.randomElement()!
-        } else {
-            instrument = introduceCrash ? .crash : (regular.first { candidate in !agents.contains { $0.instrument == candidate } } ?? regular.randomElement()!)
+        let choices: [Instrument] = switch game {
+        case .drums: [.hiHat, .crash, .hiHat, .crash]
+        case .pad: [.kick, .snare]
+        case .bass: [.floorTom]
+        case .lead: [.highTom, .snare, .kick]
         }
+        let instrument = choices.first { item in !agents.contains { $0.instrument == item } } ?? choices.randomElement()!
         let node = SKSpriteNode(imageNamed: assetName(for: instrument))
         let textureSize = node.texture?.size() ?? CGSize(width: 2, height: 1)
         let adaptiveEase = max(0.86, 1 - skillLevel * 0.018)
-        let width = CGFloat(Double.random(in: 154...198) * sizeSetting * adaptiveEase)
+        let width = CGFloat(Double.random(in: 154...198) * sizeSetting * game.size * adaptiveEase)
         node.size = CGSize(width: width, height: width * textureSize.height / textureSize.width)
         node.zPosition = CGFloat.random(in: 3...7); node.alpha = 0; node.setScale(0.72)
         if visualMode == .blackAndWhite {
@@ -134,7 +139,10 @@ final class FishGameScene: SKScene {
         }
     }
 
-    private func freeY() -> CGFloat { CGFloat.random(in: 90...max(91, size.height - 105)) }
+    private func freeY() -> CGFloat {
+        if game == .bass { return CGFloat.random(in: 90...max(91, size.height * 0.42)) }
+        return CGFloat.random(in: 90...max(91, size.height - 105))
+    }
 
     private func addHighContrastHalo(to node: SKSpriteNode, instrument: Instrument) {
         guard let texture = node.texture else { return }
@@ -167,13 +175,15 @@ final class FishGameScene: SKScene {
     private func beginRoaming(_ agent: PreyAgent) {
         guard agent.node.parent != nil else { return }
         agent.state = .roaming
-        let base = Double.random(in: 42...82) * speedSetting * (1 + skillLevel * 0.025)
+        let base = Double.random(in: 42...82) * speedSetting * game.movement * (1 + skillLevel * 0.025)
         agent.speedPulse = Double.random(in: 0.72...1.25)
         agent.velocity = CGVector(dx: (Bool.random() ? 1 : -1) * base, dy: Double.random(in: -24...24))
         agent.stateUntil = lastUpdate + Double.random(in: 0.65...2.25)
     }
 
     override func update(_ currentTime: TimeInterval) {
+        guard gameState?.isPlaying == true else { lastUpdate = currentTime; return }
+        music.update()
         let dt = min(currentTime - lastUpdate, 1.0 / 30.0); lastUpdate = currentTime
         guard dt > 0 else { return }
         for agent in agents where agent.node.parent != nil {
@@ -204,6 +214,7 @@ final class FishGameScene: SKScene {
     }
 
     private func chooseNextBehavior(_ agent: PreyAgent, at time: TimeInterval) {
+        if game == .pad { beginRoaming(agent); return }
         let roll = Double.random(in: 0...1)
         if roll < 0.34 {
             agent.state = .frozen; agent.velocity = .zero
@@ -217,7 +228,7 @@ final class FishGameScene: SKScene {
 
     private func dash(_ agent: PreyAgent, at time: TimeInterval) {
         agent.state = .dashing
-        let magnitude = Double.random(in: 120...210) * speedSetting * (1 + skillLevel * 0.025)
+        let magnitude = Double.random(in: 120...210) * speedSetting * game.movement * (1 + skillLevel * 0.025)
         agent.velocity = CGVector(dx: (Bool.random() ? 1 : -1) * magnitude, dy: Double.random(in: -90...90))
         agent.stateUntil = time + Double.random(in: 0.28...0.82)
         agent.node.run(.sequence([.scale(to: 1.08, duration: 0.07), .scale(to: 1, duration: 0.13)]))
@@ -241,8 +252,6 @@ final class FishGameScene: SKScene {
     }
 
     private func lureAttention() {
-        if musicMode == .drums { drumEngine.play(.hiHat, strength: 0.45) }
-        else { guitarEngine.play(noteIndex: 4, strength: 0.4) }
         for agent in agents.filter({ $0.state != .captured }).shuffled().prefix(2) {
             let node = agent.node, original = node.position
             node.run(.sequence([.moveBy(x: -18, y: 9, duration: 0.08), .moveBy(x: 36, y: -18, duration: 0.1), .move(to: original, duration: 0.1)]))
@@ -260,7 +269,8 @@ final class FishGameScene: SKScene {
         if node.position.x < margin { node.position.x = margin; agent.velocity.dx = abs(agent.velocity.dx) * Double.random(in: 0.75...1.2) }
         if node.position.x > size.width - margin { node.position.x = size.width - margin; agent.velocity.dx = -abs(agent.velocity.dx) * Double.random(in: 0.75...1.2) }
         if node.position.y < 70 { node.position.y = 70; agent.velocity.dy = abs(agent.velocity.dy) + 12 }
-        if node.position.y > size.height - 75 { node.position.y = size.height - 75; agent.velocity.dy = -abs(agent.velocity.dy) - 12 }
+        let ceiling = game == .bass ? max(91, size.height * 0.42) : size.height - 75
+        if node.position.y > ceiling { node.position.y = ceiling; agent.velocity.dy = -abs(agent.velocity.dy) - 12 }
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -302,7 +312,7 @@ final class FishGameScene: SKScene {
     private func flee(_ agent: PreyAgent, from point: CGPoint) {
         agent.state = .dashing
         let dx = agent.node.position.x - point.x, dy = agent.node.position.y - point.y
-        let length = max(1, hypot(dx, dy)), speed = Double.random(in: 155...225) * speedSetting
+        let length = max(1, hypot(dx, dy)), speed = Double.random(in: 155...225) * speedSetting * game.movement
         agent.velocity = CGVector(dx: dx / length * speed, dy: dy / length * speed)
         agent.stateUntil = lastUpdate + Double.random(in: 0.5...0.9)
     }
@@ -310,13 +320,10 @@ final class FishGameScene: SKScene {
     private func capture(_ agent: PreyAgent, at point: CGPoint) {
         agent.state = .captured; let caughtVelocity = agent.velocity; agent.velocity = .zero
         skillLevel = min(8, skillLevel + 0.55)
-        let guitarNames = ["低音 E", "A", "D", "G", "B", "高音 E"]
-        let noteIndex = Instrument.allCases.firstIndex(of: agent.instrument) ?? 0
-        gameState?.caught(kind: musicMode == .drums ? agent.instrument.rawValue : guitarNames[noteIndex], at: point, velocity: caughtVelocity)
+        let variant = Instrument.allCases.firstIndex(of: agent.instrument) ?? 0
+        gameState?.caught(kind: game.rawValue, at: point, velocity: caughtVelocity)
+        music.touch(role: game, variant: variant)
         UINotificationFeedbackGenerator().notificationOccurred(.success)
-        let strength = min(1, 0.72 + skillLevel * 0.03)
-        if musicMode == .drums { drumEngine.play(agent.instrument, strength: strength) }
-        else { guitarEngine.play(noteIndex: noteIndex, strength: strength) }
         makeSplash(at: agent.node.position, instrument: agent.instrument)
         let wiggles: [SKAction] = [.rotate(toAngle: 0.12, duration: 0.06), .rotate(toAngle: -0.13, duration: 0.07), .rotate(toAngle: 0.08, duration: 0.06), .rotate(toAngle: 0, duration: 0.06)]
         agent.node.run(.sequence([.scale(to: 0.9, duration: 0.08), .sequence(wiggles), .wait(forDuration: 0.16), .group([.scale(to: 0.16, duration: 0.2), .fadeOut(withDuration: 0.2)])])) { [weak self, weak agent] in
@@ -357,142 +364,6 @@ final class FishGameScene: SKScene {
         }
     }
 
-}
-
-private final class DrumSoundEngine {
-    private let sampleRate = 44_100.0
-    private var samples: [FishGameScene.Instrument: Data] = [:]
-    private var players: [AVAudioPlayer] = []
-
-    init() {
-        for instrument in FishGameScene.Instrument.allCases { samples[instrument] = render(instrument) }
-        try? AVAudioSession.sharedInstance().setCategory(.ambient, options: [.mixWithOthers])
-        try? AVAudioSession.sharedInstance().setActive(true)
-    }
-
-    func play(_ instrument: FishGameScene.Instrument, strength: Double) {
-        players.removeAll { !$0.isPlaying }
-        guard let data = samples[instrument], let player = try? AVAudioPlayer(data: data) else { return }
-        player.volume = Float(max(0.25, min(1, strength)))
-        player.prepareToPlay(); player.play(); players.append(player)
-    }
-
-    private func render(_ instrument: FishGameScene.Instrument) -> Data {
-        let duration: Double = switch instrument {
-        case .kick: 0.48
-        case .snare: 0.34
-        case .hiHat: 0.16
-        case .highTom: 0.38
-        case .floorTom: 0.5
-        case .crash: 1.15
-        }
-        let count = Int(sampleRate * duration)
-        var pcm = Data(capacity: count * 2)
-        var phase = 0.0, previousNoise = 0.0
-        var randomState: UInt64 = UInt64(instrument.rawValue.hashValue.magnitude) | 1
-
-        func noise() -> Double {
-            randomState = randomState &* 6_364_136_223_846_793_005 &+ 1
-            return Double(Int64(bitPattern: randomState) >> 32) / Double(Int32.max)
-        }
-
-        for index in 0..<count {
-            let t = Double(index) / sampleRate
-            let n = noise()
-            let sample: Double
-            switch instrument {
-            case .kick:
-                let frequency = 48 + 105 * exp(-t * 28)
-                phase += 2 * .pi * frequency / sampleRate
-                sample = sin(phase) * exp(-t * 10) + n * exp(-t * 85) * 0.12
-            case .snare:
-                phase += 2 * .pi * 185 / sampleRate
-                sample = n * exp(-t * 15) * 0.78 + sin(phase) * exp(-t * 22) * 0.34
-            case .hiHat:
-                let highPassed = n - previousNoise; previousNoise = n
-                sample = highPassed * exp(-t * 38) * 0.58
-            case .highTom, .floorTom:
-                let base = instrument == .highTom ? 155.0 : 94.0
-                let frequency = base + 46 * exp(-t * 20)
-                phase += 2 * .pi * frequency / sampleRate
-                sample = (sin(phase) + sin(phase * 1.52) * 0.18) * exp(-t * (instrument == .highTom ? 12 : 8.5))
-            case .crash:
-                let highPassed = n - previousNoise; previousNoise = n
-                let shimmer = sin(2 * .pi * 3_201 * t) + sin(2 * .pi * 4_717 * t) * 0.6
-                sample = (highPassed * 0.42 + shimmer * 0.12) * exp(-t * 3.4)
-            }
-            let clipped = tanh(sample * 1.15) * 0.82
-            var value = Int16(max(-1, min(1, clipped)) * Double(Int16.max))
-            pcm.append(Data(bytes: &value, count: 2))
-        }
-        return wavData(from: pcm)
-    }
-
-    private func wavData(from pcm: Data) -> Data {
-        var wav = Data()
-        func append<T>(_ value: T) { var value = value; wav.append(Data(bytes: &value, count: MemoryLayout<T>.size)) }
-        wav.append("RIFF".data(using: .ascii)!); append(UInt32(pcm.count + 36)); wav.append("WAVEfmt ".data(using: .ascii)!)
-        append(UInt32(16)); append(UInt16(1)); append(UInt16(1)); append(UInt32(sampleRate)); append(UInt32(sampleRate * 2)); append(UInt16(2)); append(UInt16(16))
-        wav.append("data".data(using: .ascii)!); append(UInt32(pcm.count)); wav.append(pcm)
-        return wav
-    }
-}
-
-private final class GuitarSoundEngine {
-    private let sampleRate = 44_100.0
-    private var strings: [Data] = []
-    private var players: [AVAudioPlayer] = []
-    private let frequencies = [82.41, 110.0, 146.83, 196.0, 246.94, 329.63]
-
-    init() {
-        strings = frequencies.enumerated().map { renderString(frequency: $0.element, seed: UInt64($0.offset + 11)) }
-    }
-
-    func play(noteIndex: Int, strength: Double) {
-        players.removeAll { !$0.isPlaying }
-        let index = max(0, min(strings.count - 1, noteIndex))
-        guard let player = try? AVAudioPlayer(data: strings[index]) else { return }
-        player.volume = Float(max(0.25, min(1, strength)))
-        player.prepareToPlay(); player.play(); players.append(player)
-    }
-
-    private func renderString(frequency: Double, seed: UInt64) -> Data {
-        let duration = 1.45
-        let count = Int(sampleRate * duration)
-        let delay = max(2, Int(sampleRate / frequency))
-        var ring = Array(repeating: 0.0, count: delay)
-        var state = seed
-        for index in ring.indices {
-            state = state &* 6_364_136_223_846_793_005 &+ 1
-            ring[index] = (Double(Int64(bitPattern: state) >> 32) / Double(Int32.max)) * 0.72
-        }
-        var pcm = Data(capacity: count * 2)
-        var position = 0
-        let damping = frequency < 120 ? 0.9964 : 0.9948
-        for index in 0..<count {
-            let current = ring[position]
-            let nextPosition = (position + 1) % delay
-            let averaged = (current + ring[nextPosition]) * 0.5 * damping
-            ring[position] = averaged
-            position = nextPosition
-            let t = Double(index) / sampleRate
-            let body = sin(2 * .pi * frequency * 0.5 * t) * exp(-t * 6) * 0.08
-            let pick = index < 80 ? current * (1 - Double(index) / 80) * 0.22 : 0
-            let output = tanh((current + body + pick) * 1.35) * 0.82
-            var value = Int16(max(-1, min(1, output)) * Double(Int16.max))
-            pcm.append(Data(bytes: &value, count: 2))
-        }
-        return wavData(from: pcm)
-    }
-
-    private func wavData(from pcm: Data) -> Data {
-        var wav = Data()
-        func append<T>(_ value: T) { var value = value; wav.append(Data(bytes: &value, count: MemoryLayout<T>.size)) }
-        wav.append("RIFF".data(using: .ascii)!); append(UInt32(pcm.count + 36)); wav.append("WAVEfmt ".data(using: .ascii)!)
-        append(UInt32(16)); append(UInt16(1)); append(UInt16(1)); append(UInt32(sampleRate)); append(UInt32(sampleRate * 2)); append(UInt16(2)); append(UInt16(16))
-        wav.append("data".data(using: .ascii)!); append(UInt32(pcm.count)); wav.append(pcm)
-        return wav
-    }
 }
 
 private extension CGPoint {

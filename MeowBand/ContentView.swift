@@ -1,19 +1,6 @@
 import SwiftUI
 import SpriteKit
-
-enum PreyChoice: String, CaseIterable, Identifiable {
-    case fish = "小鱼"
-    case shrimp = "小虾"
-    case moth = "飞蛾"
-    var id: Self { self }
-    var icon: String { switch self { case .fish: "fish.fill"; case .shrimp: "water.waves"; case .moth: "sparkles" } }
-}
-
-enum MusicMode: String, CaseIterable, Identifiable {
-    case drums = "鼓组"
-    case guitar = "吉他"
-    var id: Self { self }
-}
+import AVFoundation
 
 enum VisualMode: String, CaseIterable, Identifiable {
     case nightPond = "高对比夜池"
@@ -27,8 +14,8 @@ final class GameState: ObservableObject {
     @Published var phase: Phase = .setup
     @Published var score = 0
     @Published var seconds = 180
-    @Published var preyChoice: PreyChoice = .fish
-    @Published var musicMode: MusicMode = .drums
+    @Published var game: EnsembleRole = .drums
+    @Published var audioError: String?
     @Published var visualMode: VisualMode = .nightPond
     @Published var speed: Double = 1
     @Published var targetSize: Double = 1
@@ -40,8 +27,10 @@ final class GameState: ObservableObject {
     var isPlaying: Bool { phase == .playing }
 
     func begin() {
+        do { try scene?.startMusic(game: game) } catch { audioError = "声音暂时无法启动，请重试。"; return }
+        audioError = nil
         score = 0; seconds = sessionMinutes * 60; phase = .playing
-        scene?.configure(musicMode: musicMode, visualMode: visualMode, speed: speed, targetSize: targetSize)
+        scene?.configure(game: game, visualMode: visualMode, speed: speed, targetSize: targetSize)
         scene?.isPaused = false
         scene?.restartHunt()
         timer?.invalidate()
@@ -59,7 +48,7 @@ final class GameState: ObservableObject {
     func caught(kind: String, at point: CGPoint, velocity: CGVector) {
         score += 1
         NotificationCenter.default.post(name: .meowBandCatch, object: nil, userInfo: [
-            "prey": kind, "x": point.x, "y": point.y,
+            "prey": kind, "role": game.rawValue, "x": point.x, "y": point.y,
             "vx": velocity.dx, "vy": velocity.dy, "score": score,
             "timestamp": Date().timeIntervalSince1970
         ])
@@ -67,15 +56,17 @@ final class GameState: ObservableObject {
 
     func openOwnerMenu() {
         guard phase == .playing else { return }
-        phase = .paused; scene?.isPaused = true
+        phase = .paused; scene?.isPaused = true; scene?.pauseMusic()
     }
 
     func resume() {
-        scene?.configure(musicMode: musicMode, visualMode: visualMode, speed: speed, targetSize: targetSize)
+        do { try scene?.resumeMusic(game: game) } catch { audioError = "声音暂时无法恢复，请重试。"; return }
+        audioError = nil
+        scene?.configure(game: game, visualMode: visualMode, speed: speed, targetSize: targetSize)
         scene?.restartHunt(); phase = .playing; scene?.isPaused = false
     }
-    func finish() { phase = .finished; scene?.isPaused = true; timer?.invalidate() }
-    func backToSetup() { phase = .setup; scene?.isPaused = true; timer?.invalidate() }
+    func finish() { phase = .finished; scene?.isPaused = true; scene?.stopMusic(); timer?.invalidate() }
+    func backToSetup() { phase = .setup; scene?.isPaused = true; scene?.stopMusic(); timer?.invalidate() }
 }
 
 extension Notification.Name {
@@ -86,6 +77,7 @@ extension Notification.Name {
 struct ContentView: View {
     @StateObject private var state = GameState()
     @State private var scene: FishGameScene?
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         GeometryReader { proxy in
@@ -107,6 +99,11 @@ struct ContentView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .meowBandOwnerMenu)) { _ in state.openOwnerMenu() }
         }
+        .onChange(of: scenePhase) { _, phase in if phase != .active { state.openOwnerMenu() } }
+        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { notification in
+            if let type = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+               type == AVAudioSession.InterruptionType.began.rawValue { state.openOwnerMenu() }
+        }
         .fontDesign(.rounded)
         .preferredColorScheme(.dark)
         .animation(.easeInOut(duration: 0.25), value: state.phase)
@@ -115,56 +112,47 @@ struct ContentView: View {
     private var setupView: some View {
         ZStack {
             Rectangle().fill(.ultraThinMaterial).ignoresSafeArea()
-            HStack(spacing: 44) {
-                VStack(alignment: .leading, spacing: 14) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
                     Text("MEOWBAND").font(.caption.weight(.black)).tracking(4).foregroundStyle(.yellow)
-                    Text(state.musicMode == .drums ? "让小猫来打鼓" : "让小猫弹吉他")
-                        .font(.system(size: 44, weight: .black, design: .rounded))
-                    Text(state.musicMode == .drums ? "每种猎物都是一面鼓。\n抓到它，就敲响它。" : "每种猎物都是一根琴弦。\n抓到它，就拨响它。")
-                        .font(.title3.weight(.semibold)).foregroundStyle(.white.opacity(0.72)).lineSpacing(5)
+                    Text("小猫的四人乐队").font(.system(size: 40, weight: .black, design: .rounded))
+                    Text("选一个游戏，让小猫带领一个声部。\n随意拍，乐队会接着演奏。")
+                        .font(.title3).foregroundStyle(.white.opacity(0.75))
+                    settingsPanel(buttonTitle: "开始游戏", action: state.begin)
                     Label("游戏中双指按住 2 秒打开主人设置", systemImage: "hand.raised.fingers.spread")
-                        .font(.subheadline.weight(.bold)).foregroundStyle(.white.opacity(0.58)).padding(.top, 10)
-                }.frame(maxWidth: 430, alignment: .leading)
-                settingsPanel(buttonTitle: "开始捕猎", action: state.begin)
+                        .font(.subheadline).foregroundStyle(.white.opacity(0.65))
+                }.frame(maxWidth: 620).padding(32).frame(maxWidth: .infinity)
             }
-            .padding(50)
         }
     }
 
     private var ownerMenu: some View {
         ZStack {
             Color.black.opacity(0.48).ignoresSafeArea().background(.ultraThinMaterial)
-            settingsPanel(buttonTitle: "继续游戏", action: state.resume)
-                .frame(maxWidth: 520)
+            ScrollView { settingsPanel(buttonTitle: "继续游戏", action: state.resume).frame(maxWidth: 620).padding(24).frame(maxWidth: .infinity) }
         }
     }
 
     private func settingsPanel(buttonTitle: String, action: @escaping () -> Void) -> some View {
         VStack(spacing: 22) {
-            Picker("乐器", selection: $state.musicMode) {
-                ForEach(MusicMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
-            }
-            .pickerStyle(.segmented)
-            Picker("画面", selection: $state.visualMode) {
-                ForEach(VisualMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
-            }
-            .pickerStyle(.segmented)
-            HStack(spacing: 8) {
-                if state.musicMode == .drums {
-                    instrumentLegend("fish.fill", "底鼓", .yellow)
-                    instrumentLegend("circle.grid.cross", "军鼓", .cyan)
-                    instrumentLegend("water.waves", "踩镲", .orange)
-                    instrumentLegend("circle.hexagongrid", "嗵鼓", .purple)
-                    instrumentLegend("sparkles", "镲片", .white)
-                } else {
-                    instrumentLegend("circle.fill", "低音 E", .orange)
-                    instrumentLegend("circle.fill", "A", .yellow)
-                    instrumentLegend("circle.fill", "D", .cyan)
-                    instrumentLegend("circle.fill", "G", .blue)
-                    instrumentLegend("sparkles", "高音 E", .purple)
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                ForEach(EnsembleRole.allCases) { game in
+                    Button { state.game = game } label: {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label(game.title, systemImage: game.icon).font(.headline)
+                            Text(game.detail).font(.caption).multilineTextAlignment(.leading)
+                        }
+                        .foregroundStyle(state.game == game ? Color.black : .white)
+                        .frame(maxWidth: .infinity, minHeight: 78, alignment: .leading).padding(12)
+                        .background(state.game == game ? Color.yellow : Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 16))
+                    }.buttonStyle(.plain).accessibilityAddTraits(state.game == game ? .isSelected : [])
                 }
             }
-            settingSlider("速度", value: $state.speed, range: 0.65...1.45, low: "悠闲", high: "敏捷")
+            Picker("画面", selection: $state.visualMode) {
+                ForEach(VisualMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
+            }.pickerStyle(.segmented)
+            if let error = state.audioError { Text(error).foregroundStyle(.yellow).font(.subheadline) }
+            settingSlider("猎物速度", value: $state.speed, range: 0.65...1.45, low: "悠闲", high: "敏捷")
             settingSlider("猎物大小", value: $state.targetSize, range: 0.8...1.35, low: "小", high: "大")
             Picker("时长", selection: $state.sessionMinutes) {
                 Text("2 分钟").tag(2); Text("3 分钟").tag(3); Text("5 分钟").tag(5)
@@ -177,15 +165,6 @@ struct ContentView: View {
         .background(Color(red: 0.03, green: 0.28, blue: 0.35).opacity(0.94), in: RoundedRectangle(cornerRadius: 30))
         .overlay(RoundedRectangle(cornerRadius: 30).stroke(.white.opacity(0.18)))
         .shadow(color: .black.opacity(0.3), radius: 35, y: 18)
-    }
-
-    private func instrumentLegend(_ icon: String, _ name: String, _ color: Color) -> some View {
-        VStack(spacing: 7) {
-            Image(systemName: icon).font(.title3).foregroundStyle(color)
-            Text(name).font(.caption.weight(.black))
-        }
-        .frame(maxWidth: .infinity).frame(height: 66)
-        .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 15))
     }
 
     private func settingSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, low: String, high: String) -> some View {
